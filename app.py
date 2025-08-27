@@ -1,149 +1,129 @@
-# app.py
-import av
+import streamlit as st
 import cv2
 import numpy as np
-import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+import av
 from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-st.set_page_config(page_title="Deteksi Ekspresi Wajah", page_icon="🎭", layout="wide")
+# ======================
+# Load Model
+# ======================
+@st.cache_resource
+def load_emotion_model():
+    try:
+        model = load_model("mobileNet_emotion_recog.h5")
+        return model
+    except Exception as e:
+        st.error(f"❌ Gagal load model: {e}")
+        return None
 
-# =========================
-# Konfigurasi & Utilities
-# =========================
+model = load_emotion_model()
 
-# Label emosi sesuai urutan output model Anda
-# ⚠️ Pastikan jumlah label sesuai dengan output dari model best.h5
-EMOTION_LABELS = ['Angry','Disgust','Fear', 'Happy','Neutral', 'Sad','Surprise']
+# Label Ekspresi sesuai model
+emotion_labels = ['Marah', 'Jijik', 'Takut', 'Bahagia', 'Netral', 'Sedih', 'Terkejut']
 
-@st.cache_resource(show_spinner=False)
-def load_emotion_model(path: str = "mobileNet_emotion_recog.h5"):
-    return load_model(path)
+# ======================
+# Face Detection
+# ======================
+try:
+    face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+    if face_cascade.empty():
+        raise IOError("Cascade XML tidak ditemukan atau rusak")
+except Exception as e:
+    st.error(f"❌ Gagal load cascade classifier: {e}")
+    face_cascade = None
 
-@st.cache_resource(show_spinner=False)
-def load_face_detector(path: str = "haarcascade_frontalface_default.xml"):
-    return cv2.CascadeClassifier(path)
+# ======================
+# Streamlit UI
+# ======================
+st.set_page_config(page_title="Deteksi Ekspresi Wajah", page_icon="😊", layout="wide")
+st.title("😊 Deteksi Ekspresi Wajah Real-Time")
+st.write("Ekspresi: Marah, Jijik, Takut, Bahagia, Netral, Sedih, Terkejut")
 
-def preprocess_face(gray_face: np.ndarray) -> np.ndarray:
-    """
-    Preproses ROI wajah untuk model: grayscale 48x48, normalisasi 0-1
-    Output shape: (1, 48, 48, 1)
-    """
-    face = cv2.resize(gray_face, (48, 48))
-    face = face.astype("float32") / 255.0
-    face = np.expand_dims(face, axis=(0, -1))
-    return face
+# ======================
+# Fungsi Prediksi
+# ======================
+def predict_emotion(face_img):
+    if model is None:
+        return "Model tidak tersedia", 0.0
 
-# =========================
-# UI
-# =========================
-st.title("🎭 Deteksi Ekspresi Wajah — Real-time")
-st.caption("Menggunakan model: `emotion_model.h5` + haarcascade_frontalface_default.xml")
+    try:
+        face_img = cv2.resize(face_img, (224, 224))
+        face_img = face_img.astype("float") / 255.0
+        face_img = img_to_array(face_img)
+        face_img = np.expand_dims(face_img, axis=0)
 
-col1, col2 = st.columns([2, 1], gap="large")
+        preds = model.predict(face_img, verbose=0)[0]
+        label = emotion_labels[np.argmax(preds)]
+        confidence = np.max(preds) * 100
+        return label, confidence
+    except Exception as e:
+        return f"Error: {e}", 0.0
 
-with col2:
-    st.subheader("Pengaturan")
-    draw_box = st.toggle("Tampilkan Bounding Box", value=True)
-    show_conf = st.toggle("Tampilkan Confidence", value=True)
-    min_face = st.slider("Ukuran minimum wajah (px)", 60, 200, 90, 10)
-    scaleFactor = st.slider("Haar scaleFactor", 1.05, 1.50, 1.20, 0.01)
-    minNeighbors = st.slider("Haar minNeighbors", 3, 10, 5, 1)
-
-with col1:
-    st.subheader("Kamera")
-    st.info("Klik **Start** untuk mulai streaming video.")
-
-# =========================
-# Video Transformer
-# =========================
-class EmotionTransformer(VideoTransformerBase):
-    def __init__(self, draw_box=True, show_conf=True, min_size=90, scaleFactor=1.2, minNeighbors=5):
-        self.model = load_emotion_model()
-        self.detector = load_face_detector("haarcascade_frontalface_default.xml")
-        self.draw_box = draw_box
-        self.show_conf = show_conf
-        self.min_size = min_size
-        self.scaleFactor = scaleFactor
-        self.minNeighbors = minNeighbors
-        self.last_probs = None  # untuk panel probabilitas
-
-    def predict_emotion(self, gray_face: np.ndarray):
-        x = preprocess_face(gray_face)
-        preds = self.model.predict(x, verbose=0)[0]  # shape: (n_class,)
-        idx = int(np.argmax(preds))
-        label = EMOTION_LABELS[idx] if idx < len(EMOTION_LABELS) else f"Class {idx}"
-        conf = float(np.max(preds))
-        return label, conf, preds
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+# ======================
+# Video Processor (Kamera)
+# ======================
+class EmotionProcessor(VideoProcessorBase):
+    def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        if face_cascade is None:
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        faces = self.detector.detectMultiScale(
-            gray,
-            scaleFactor=self.scaleFactor,
-            minNeighbors=self.minNeighbors,
-            minSize=(self.min_size, self.min_size)
-        )
-
-        best_probs = None
-        faces = sorted(list(faces), key=lambda b: b[2] * b[3], reverse=True)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
         for (x, y, w, h) in faces:
             roi_gray = gray[y:y+h, x:x+w]
-            label, conf, probs = self.predict_emotion(roi_gray)
 
-            if best_probs is None:
-                best_probs = probs
+            label, confidence = predict_emotion(roi_gray)
 
-            if self.draw_box:
-                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(img, f"{label} ({confidence:.1f}%)", (x, y-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-            text = label if not self.show_conf else f"{label} ({conf:.2f})"
-            cv2.putText(
-                img, text, (x, max(0, y - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA
-            )
-
-        self.last_probs = best_probs
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# =========================
-# Jalankan WebRTC
-# =========================
-ctx = webrtc_streamer(
-    key="emotion-rtc",
-    mode=WebRtcMode.SENDRECV,
-    media_stream_constraints={"video": True, "audio": False},
-    video_transformer_factory=lambda: EmotionTransformer(
-        draw_box=draw_box,
-        show_conf=show_conf,
-        min_size=min_face,
-        scaleFactor=scaleFactor,
-        minNeighbors=minNeighbors,
-    ),
-    async_processing=True,
-)
+# ======================
+# Mode Aplikasi
+# ======================
+mode = st.sidebar.radio("Pilih Mode:", ["📷 Kamera", "🖼️ Upload Gambar"])
 
-# =========================
-# Panel Probabilitas
-# =========================
-with col2:
-    st.subheader("Probabilitas (wajah utama)")
-    if ctx and ctx.video_transformer and ctx.video_transformer.last_probs is not None:
-        probs = ctx.video_transformer.last_probs
-        for label, p in zip(EMOTION_LABELS, probs):
-            st.write(f"- **{label}**: {p:.3f}")
-    else:
-        st.write("Belum ada data. Mulai kamera untuk melihat probabilitas.")
-
-st.markdown("---")
-with st.expander("ℹ️ Catatan"):
-    st.markdown(
-        """
-- Pastikan file **`best.h5`** dan **`haarcascade_frontalface_default.xml`** berada di direktori yang sama dengan `app.py`.  
-- Urutan `EMOTION_LABELS` harus sesuai dengan urutan output model Anda.  
-- Jika kamera tidak menyala, cek izin kamera di browser (harus HTTPS/localhost).  
-        """
+if mode == "📷 Kamera":
+    st.subheader("Deteksi Ekspresi via Kamera")
+    webrtc_streamer(
+        key="emotion-detection",
+        video_processor_factory=EmotionProcessor,
+        media_stream_constraints={"video": True, "audio": False},
     )
+
+elif mode == "🖼️ Upload Gambar":
+    st.subheader("Deteksi Ekspresi via Upload Gambar")
+    uploaded_file = st.file_uploader("Upload gambar wajah", type=["jpg", "jpeg", "png"])
+
+    if uploaded_file is not None:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        img = cv2.imdecode(file_bytes, 1)
+
+        if face_cascade is None:
+            st.error("❌ Face Cascade tidak tersedia")
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+            if len(faces) == 0:
+                st.warning("⚠️ Wajah tidak terdeteksi.")
+            else:
+                for (x, y, w, h) in faces:
+                    roi_gray = gray[y:y+h, x:x+w]
+
+                    label, confidence = predict_emotion(roi_gray)
+
+                    cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(img, f"{label} ({confidence:.1f}%)", (x, y-10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
+                         caption="Hasil Deteksi",
+                         use_column_width=True)
+
