@@ -1,6 +1,6 @@
 streamlit
 streamlit-webrtc
 opencv-python-headless
-tensorflow
+tensorflow  # atau versi yang cocok dengan model Anda
 numpy
 av
