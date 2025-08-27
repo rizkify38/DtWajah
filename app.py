@@ -17,7 +17,7 @@ def load_emotion_model():
 model = load_emotion_model()
 
 # Label Ekspresi sesuai model
-emotion_labels = ['Marah', 'Jijik', 'Takut', 'Bahagia', 'Netral', 'Sedih', 'Terkejut']
+emotion_labels = ['Angry','Disgust','Fear', 'Happy','Neutral', 'Sad','Surprise']
 
 # ======================
 # Face Detection
