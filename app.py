@@ -11,7 +11,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 # ======================
 @st.cache_resource
 def load_emotion_model():
-    model = load_model("mobileNet_emotion_recog.h5")
+    model = load_model("Emotion_Detection.h5")
     return model
 
 model = load_emotion_model()
